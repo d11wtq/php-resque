@@ -18,6 +18,7 @@ class Resque_Worker
 	const LOG_NONE = 0;
 	const LOG_NORMAL = 1;
 	const LOG_VERBOSE = 2;
+	const LOG_VERY_VERBOSE = 3;
 
 	/**
 	 * @var int Current log level of this worker.
@@ -174,7 +175,7 @@ class Resque_Worker
 					break;
 				}
 				// If no job was found, we sleep for $interval before continuing and checking again
-				$this->log('Sleeping for ' . $interval, true);
+				$this->log('Sleeping for ' . $interval, self::LOG_VERY_VERBOSE);
 				if($this->paused) {
 					$this->updateProcLine('Paused');
 				}
@@ -185,7 +186,7 @@ class Resque_Worker
 				continue;
 			}
 
-			$this->log('got ' . $job);
+			$this->log('got ' . $job, self::LOG_NORMAL);
 			Resque_Event::trigger('beforeFork', $job);
 			$this->workingOn($job);
 
@@ -195,7 +196,7 @@ class Resque_Worker
 			if($this->child === 0 || $this->child === false) {
 				$status = 'Processing ' . $job->queue . ' since ' . strftime('%F %T');
 				$this->updateProcLine($status);
-				$this->log($status, self::LOG_VERBOSE);
+				$this->log($status, self::LOG_VERY_VERBOSE);
 				$this->perform($job);
 				if($this->child === 0) {
 					exit(0);
@@ -206,10 +207,13 @@ class Resque_Worker
 				// Parent process, sit and wait
 				$status = 'Forked ' . $this->child . ' at ' . strftime('%F %T');
 				$this->updateProcLine($status);
-				$this->log($status, self::LOG_VERBOSE);
+				$this->log($status, self::LOG_VERY_VERBOSE);
 
 				// Wait until the child process finishes before continuing
-				pcntl_wait($status);
+				while (!pcntl_waitpid($this->child, $status, WNOHANG)) {
+					usleep(1000000);
+				}
+
 				$exitStatus = pcntl_wexitstatus($status);
 				if($exitStatus !== 0) {
 					$job->fail(new Resque_Job_DirtyExitException(
@@ -237,13 +241,13 @@ class Resque_Worker
 			$job->perform();
 		}
 		catch(Exception $e) {
-			$this->log($job . ' failed: ' . $e->getMessage());
+			$this->log($job . ' failed: ' . $e->getMessage(), self::LOG_NORMAL);
 			$job->fail($e);
 			return;
 		}
 
 		$job->updateStatus(Resque_Job_Status::STATUS_COMPLETE);
-		$this->log('done ' . $job);
+		$this->log('done ' . $job, self::LOG_NORMAL);
 	}
 
 	/**
@@ -258,10 +262,10 @@ class Resque_Worker
 			return;
 		}
 		foreach($queues as $queue) {
-			$this->log('Checking ' . $queue, self::LOG_VERBOSE);
+			$this->log('Checking ' . $queue, self::LOG_VERY_VERBOSE);
 			$job = Resque_Job::reserve($queue);
 			if($job) {
-				$this->log('Found job on ' . $queue, self::LOG_VERBOSE);
+				$this->log('Found job on ' . $queue, self::LOG_VERY_VERBOSE);
 				return $job;
 			}
 		}
@@ -333,7 +337,7 @@ class Resque_Worker
 	private function updateProcLine($status)
 	{
 		if(function_exists('setproctitle')) {
-			setproctitle('resque-' . Resque::VERSION . ': ' . $status);
+			setproctitle('php-resque-' . Resque::VERSION . ': ' . $status);
 		}
 	}
 
@@ -358,7 +362,7 @@ class Resque_Worker
 		pcntl_signal(SIGUSR1, array($this, 'killChild'));
 		pcntl_signal(SIGUSR2, array($this, 'pauseProcessing'));
 		pcntl_signal(SIGCONT, array($this, 'unPauseProcessing'));
-		$this->log('Registered signals', self::LOG_VERBOSE);
+		$this->log('Registered signals', self::LOG_VERY_VERBOSE);
 	}
 
 	/**
@@ -387,7 +391,7 @@ class Resque_Worker
 	public function shutdown()
 	{
 		$this->shutdown = true;
-		$this->log('Exiting...');
+		$this->log('Exiting...', self::LOG_VERBOSE);
 	}
 
 	/**
@@ -407,18 +411,18 @@ class Resque_Worker
 	public function killChild()
 	{
 		if(!$this->child) {
-			$this->log('No child to kill.', self::LOG_VERBOSE);
+			$this->log('No child to kill.', self::LOG_VERY_VERBOSE);
 			return;
 		}
 
-		$this->log('Killing child at ' . $this->child, self::LOG_VERBOSE);
+		$this->log('Killing child at ' . $this->child, self::LOG_VERY_VERBOSE);
 		if(exec('ps -o pid,state -p ' . $this->child, $output, $returnCode) && $returnCode != 1) {
-			$this->log('Killing child at ' . $this->child, self::LOG_VERBOSE);
+			$this->log('Killing child at ' . $this->child, self::LOG_VERY_VERBOSE);
 			posix_kill($this->child, SIGKILL);
 			$this->child = null;
 		}
 		else {
-			$this->log('Child ' . $this->child . ' not found, restarting.', self::LOG_VERBOSE);
+			$this->log('Child ' . $this->child . ' not found, restarting.', self::LOG_VERY_VERBOSE);
 			$this->shutdown();
 		}
 	}
@@ -440,7 +444,7 @@ class Resque_Worker
 			if($host != $this->hostname || in_array($pid, $workerPids) || $pid == getmypid()) {
 				continue;
 			}
-			$this->log('Pruning dead worker: ' . (string)$worker, self::LOG_VERBOSE);
+			$this->log('Pruning dead worker: ' . (string)$worker, self::LOG_VERY_VERBOSE);
 			$worker->unregisterWorker();
 		}
 	}
@@ -532,14 +536,18 @@ class Resque_Worker
 	 *
 	 * @param string $message Message to output.
 	 */
-	public function log($message)
+	public function log($message, $logLevel = self::LOG_NORMAL)
 	{
-		if($this->logLevel == self::LOG_NORMAL) {
-			fwrite(STDOUT, "*** " . $message . "\n");
+		if ($logLevel > $this->logLevel) {
+			return;
 		}
-		else if($this->logLevel == self::LOG_VERBOSE) {
+
+		if($this->logLevel == self::LOG_VERBOSE || $this->logLevel == self::LOG_VERY_VERBOSE) {
 			fwrite(STDOUT, "** [" . strftime('%T %Y-%m-%d') . "] " . $message . "\n");
 		}
+		else {
+			fwrite(STDOUT, "*** " . $message . "\n");
+		} 
 	}
 
 	/**

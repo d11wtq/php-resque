@@ -1,3 +1,7 @@
+(This is currently just a personal fork with some fixes for personal
+projects.  I aim to push changes back to the main project, which you
+should use instead of this one.)
+
 php-resque: PHP Resque Worker (and Enqueue)
 ===========================================
 
